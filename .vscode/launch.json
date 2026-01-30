@@ -1,0 +1,15 @@
+{
+  "name": "Python: Current File",
+  "type": "python",
+  "request": "launch",
+  "program": "${file}",
+  "python": "/home/jychung/ads_venv/bin/python",
+  "console": "integratedTerminal",
+  "justMyCode": false,
+  "env": {
+    "HPEESOF_DIR": "/TOOLS/KEYSIGHT",
+    "ADS_LICENSE_FILE": "27009@166.104.46.65",
+    "PATH": "/TOOLS/KEYSIGHT/bin:${env:PATH}",
+    "LD_LIBRARY_PATH": "/TOOLS/KEYSIGHT/lib/linux_x86_64:${env:LD_LIBRARY_PATH}"
+  }
+}

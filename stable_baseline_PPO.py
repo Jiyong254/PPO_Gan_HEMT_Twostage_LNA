@@ -10,8 +10,6 @@ PPO2-style circuit optimization template
 - Env.step() calls ADS in a separate process (safe/robust for ADS + Jupyter issues).
 """
 
-from __future__ import annotations
-
 import json
 import os
 import shutil
@@ -64,9 +62,6 @@ class CircuitSpec:
 
 @dataclass
 class AdsRunnerConfig:
-    ads_python: str                 # e.g. "/TOOLS/KEYSIGHT/tools/python/bin/python3"
-    runner_script: str              # e.g. "/home/user/project/ads_runner.py"
-    project_dir: str                # directory containing ADS project/template
     ADS_sim_output_dir: str         # ADS simulation output directory
 
 
@@ -142,22 +137,23 @@ class AdsCircuitEnv(gym.Env):
             return -100.0, {"fail": 1.0}
 
         # ADS simulation 결과 추출
-        ads_sim_output = dataset.open(AdsRunnerConfig.ADS_sim_output_dir + "sample_gan_25GHz_twostage_ppo.ds")
+        ads_sim_output = dataset.open(runner.ADS_sim_output_dir + "sample_gan_25GHz_twostage_ppo.ds")
         sim_output_data = ads_sim_output["SP1.SP"].to_dataframe().reset_index()
 
         f = np.asarray(sim_output_data["freq"], dtype=float)
-        s11 = np.asarray(sim["S[1,1]"], dtype=complex)
-        s22 = np.asarray(sim["S[2,2]"], dtype=complex)
-        NF = np.asarray(sim["nf[2]"], dtype=float)
+        s11 = np.asarray(sim_output_data["S[1,1]"], dtype=complex)
+        s22 = np.asarray(sim_output_data["S[2,2]"], dtype=complex)
+        NF = np.asarray(sim_output_data["nf[2]"], dtype=float)
 
         # 관심 있는 주파수 영역만 남긴다
-        m = self.band_mask(f, spec.f_min_ghz, spec.f_max_ghz)
-        if not np.any(m):
+        idx_target_freq = np.where((f >= spec.f_min_ghz) & (f <= spec.f_max_ghz))[0]
+
+        if not np.any(idx_target_freq):
             return -50.0, {"fail": 1.0}
 
-        s11_b = s11[m]
-        s22_b = s22[m]
-        NF_b = NF[m]
+        s11_b = 20*np.log10(abs(s11[idx_target_freq]))
+        s22_b = 20*np.log10(abs(s22[idx_target_freq]))
+        NF_b = NF[idx_target_freq]
 
         # Convert targets to "violations"
         # For S11/S22: want <= target (more negative is better)
@@ -172,6 +168,7 @@ class AdsCircuitEnv(gym.Env):
         p_s22 = np.mean(np.maximum(v_s22, 0.0))
         p_NF = np.mean(np.maximum(v_NF, 0.0))
         p_trade = float(p_s11 * p_NF)
+        print(sim_output_data["freq"][idx_target_freq])
 
         # reward as negative penalties (you can redesign this)
         reward = (
@@ -186,6 +183,7 @@ class AdsCircuitEnv(gym.Env):
         if meets:
             reward += 5.0
 
+        #
         info = {
             "p_s11": float(p_s11),
             "p_s22": float(p_s22),
@@ -247,6 +245,7 @@ class AdsCircuitEnv(gym.Env):
         self.params = self.param_init.copy()
         self.step_idx = 0
         self.last_info = {"p_s11": 0.0, "p_s22": 0.0, "p_NF": 0.0}
+
         return self._get_obs(), {}
 
     def step(self, action: np.ndarray):
@@ -282,15 +281,12 @@ def main():
         s11_db_target=-10.0,
         s22_db_target=-10.0,
         NF_db_target=2.0,
-        f_min_ghz=12.0,
-        f_max_ghz=18.0,
+        f_min_ghz=12.0e9,
+        f_max_ghz=18.0e9,
     )
 
     runner = AdsRunnerConfig(
-        ads_python="/TOOLS/KEYSIGHT/tools/python/bin/python3",   # <- set
-        runner_script="/home/jychung/python/ads_runner.py",      # <- set
-        project_dir="/home/jychung/ADS_PROJECTS/my_lna_wrk",      # <- set
-        ADS_sim_output_dir="/home/jychung/python/twostage_lna_ads_sim_output",
+        ADS_sim_output_dir="/home/jychung/ADS_project/test/"
     )
 
     # Example parameter vector (e.g., TL lengths, widths, bias resistors...)
@@ -343,11 +339,12 @@ def main():
         vf_coef=0.5,
         max_grad_norm=0.5,
         tensorboard_log="./runs_sb3",
-        device="auto",
+        device="cpu",
     )
 
     try :
         model.learn(total_timesteps=200_000)
+        print("end 1 iter")
     except KeyboardInterrupt:
         model.save("ppo_ads_circuit")
         if (workspace.close()):
@@ -360,3 +357,8 @@ def main():
         action, _ = model.predict(obs, deterministic=True)
         obs, reward, done, info = vec_env.step(action)
         print("reward:", reward, "info:", info)
+
+if __name__ == "__main__":
+    
+    main()
+ 
