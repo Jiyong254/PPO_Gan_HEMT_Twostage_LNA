@@ -46,16 +46,14 @@ from stable_baselines3.common.monitor import Monitor
 class CircuitSpec:
     # Example targets (edit to your spec)
     s11_db_target: float = -10.0     # want <= -10 dB
-    s22_db_target: float = -10.0
-    NF_db_target: float = 10.0     # want >= 10 dB (|S21| in dB)
+   # want >= 10 dB (|S21| in dB)
     # Frequency band for evaluation
     f_min_ghz: float = 3.0
     f_max_ghz: float = 5.0
 
     # Reward weights
     w_s11: float = 1.0
-    w_s22: float = 1.0
-    w_NF: float = 0.5
+
     w_penalty: float = 0.2
     w_trade: float = 0.5
 
@@ -110,15 +108,15 @@ class AdsCircuitEnv(gym.Env):
         # Action: [-1, 1]^n
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(n,), dtype=np.float32)
 
-        # Observation: normalized params (0..1) + last penalties (3) + step fraction (1)
+        # Observation: normalized params (0..1) + last penalties (1) + step fraction (1)
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(n + 3 + 1,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(n + 1 + 1,), dtype=np.float32
         )
 
         self._rng = np.random.default_rng(seed)
         self.params = self.param_init.copy()
         self.step_idx = 0
-        self.last_info = {"p_s11": 0.0, "p_s22": 0.0, "p_NF": 0.0}
+        self.last_info = {"p_s11": 0.0}
 
     def softplus(self, x: np.ndarray) -> np.ndarray:
         # stable softplus
@@ -137,59 +135,43 @@ class AdsCircuitEnv(gym.Env):
             return -100.0, {"fail": 1.0}
 
         # ADS simulation 결과 추출
-        ads_sim_output = dataset.open(runner.ADS_sim_output_dir + "sample_gan_25GHz_twostage_ppo.ds")
+        ads_sim_output = dataset.open(runner.ADS_sim_output_dir + "PPO_test.ds")
         sim_output_data = ads_sim_output["SP1.SP"].to_dataframe().reset_index()
 
         f = np.asarray(sim_output_data["freq"], dtype=float)
         s11 = np.asarray(sim_output_data["S[1,1]"], dtype=complex)
-        s22 = np.asarray(sim_output_data["S[2,2]"], dtype=complex)
-        NF = np.asarray(sim_output_data["nf[2]"], dtype=float)
 
         # 관심 있는 주파수 영역만 남긴다
-        idx_target_freq = np.where((f >= spec.f_min_ghz) & (f <= spec.f_max_ghz))[0]
+        idx_target_freq = np.where((f >= 19.5e9) & (f <= 20.5e9))[0]
 
-        if not np.any(idx_target_freq):
+        if idx_target_freq.size == 0:
             return -50.0, {"fail": 1.0}
 
-        s11_b = 20*np.log10(abs(s11[idx_target_freq]))
-        s22_b = 20*np.log10(abs(s22[idx_target_freq]))
-        NF_b = NF[idx_target_freq]
+        s11_b = 20*np.log10(np.abs(s11[idx_target_freq]) + 1e-12)
 
         # Convert targets to "violations"
         # For S11/S22: want <= target (more negative is better)
         v_s11 = (s11_b - spec.s11_db_target)  # <= 0 good
-        v_s22 = (s22_b - spec.s22_db_target)
-
-        # For gain: want >= target
-        v_NF = (NF_b - spec.NF_db_target)  # <= 0 good
 
         # penalties: only when violation > 0
-        p_s11 = np.mean(np.maximum(v_s11, 0.0))
-        p_s22 = np.mean(np.maximum(v_s22, 0.0))
-        p_NF = np.mean(np.maximum(v_NF, 0.0))
-        p_trade = float(p_s11 * p_NF)
+        p_s11 = np.mean(np.maximum(v_s11, 0.0)) # 다른 spec까지 고려할 때는 만족하는 부분은 0으로 처리하는게 유리할 수 있다. => clipping
 
         # reward as negative penalties (you can redesign this)
         reward = (
             -spec.w_s11 * p_s11
-            -spec.w_s22 * p_s22
-            -spec.w_NF * p_NF
-            -spec.w_trade * p_trade
         )
 
         print("reward computation done")
         print(reward)
 
         # small bonus if fully meets all specs in-band
-        meets = (np.max(v_s11) <= 0) and (np.max(v_s22) <= 0) and (np.max(v_NF) <= 0)
+        meets = (np.max(v_s11) <= 0)
         if meets:
             reward += 5.0
 
         #
         info = {
             "p_s11": float(p_s11),
-            "p_s22": float(p_s22),
-            "p_NF": float(p_NF),
             "meets": float(meets),
             "reward": float(reward),
         }
@@ -209,12 +191,11 @@ class AdsCircuitEnv(gym.Env):
         """
 
         try: 
-            ELC19 = self.design.get_instance("ELC19")
-            ELC19.parameters["W"].value = str(current_param[0])
-            ELC19.parameters["L"].value = str(current_param[1])
-
             TL1 = self.design.get_instance("TL1")
-            TL1.parameters["L"].value = str(current_param[2])
+            TL1.parameters["L"].value = str(current_param[0])
+
+            TL2 = self.design.get_instance("TL2")
+            TL2.parameters["L"].value = str(current_param[1])
 
             netlist = self.design.generate_netlist()
             simulator = ads.CircuitSimulator()
@@ -222,6 +203,7 @@ class AdsCircuitEnv(gym.Env):
 
             return {"ok": True}
         except :
+            print(current_param[0])
             return {"ok": False}
         
 
@@ -232,9 +214,7 @@ class AdsCircuitEnv(gym.Env):
         nrm = self._norm_params(self.params)
         obs = np.concatenate([
             nrm,
-            np.array([self.last_info.get("p_s11", 0.0),
-                      self.last_info.get("p_s22", 0.0),
-                      self.last_info.get("p_NF", 0.0)], dtype=np.float64),
+            np.array([self.last_info.get("p_s11", 0.0)], dtype=np.float64),
             np.array([self.step_idx / max(1, self.max_steps)], dtype=np.float64),
         ])
         return obs.astype(np.float32)
@@ -246,7 +226,7 @@ class AdsCircuitEnv(gym.Env):
         # Reset params (optionally randomize around init for exploration)
         self.params = self.param_init.copy()
         self.step_idx = 0
-        self.last_info = {"p_s11": 0.0, "p_s22": 0.0, "p_NF": 0.0}
+        self.last_info = {"p_s11": 0.0}
 
         return self._get_obs(), {}
 
@@ -281,8 +261,6 @@ def main():
     # ---- TODO: set these to your actual values ----
     spec = CircuitSpec(
         s11_db_target=-10.0,
-        s22_db_target=-10.0,
-        NF_db_target=2.0,
         f_min_ghz=12.0e9,
         f_max_ghz=18.0e9,
     )
@@ -292,13 +270,13 @@ def main():
     )
 
     # Example parameter vector (e.g., TL lengths, widths, bias resistors...)
-    # (ELC19_W, ELC19_L, TL6_L)
-    param_init = np.array([50e-6, 50e-6, 200e-6], dtype=np.float64) 
-    param_low  = np.array([ 16e-6, 16e-6,  9e-6], dtype=np.float64)
-    param_high = np.array([100e-6, 100e-6, 500e-6], dtype=np.float64)
+    # (TL1_L, TL2_L)
+    param_init = np.array([50e-6, 50e-6], dtype=np.float64) 
+    param_low  = np.array([ 9e-6, 9e-6], dtype=np.float64)
+    param_high = np.array([1000e-6, 2000e-6], dtype=np.float64)
     
     try :
-        cell_name = "sample_gan_25GHz_twostage_ppo"
+        cell_name = "PPO_test"
 
         workspace_path = "/home/jychung/ADS_project/test"
         workspace = de.open_workspace(workspace_path)
@@ -331,8 +309,8 @@ def main():
         policy="MlpPolicy",
         env=vec_env,
         verbose=1,
-        n_steps=8,           # rollout length
-        batch_size=8,
+        n_steps=256,           # rollout length
+        batch_size=256,
         learning_rate=3e-4,
         gamma=0.99,
         gae_lambda=0.95,
@@ -340,13 +318,13 @@ def main():
         ent_coef=0.0,
         vf_coef=0.5,
         max_grad_norm=0.5,
-        tensorboard_log="./runs_sb3",
+        tensorboard_log="./runs_PPO_test",
         device="cpu",
     )
 
     try :
-        model.learn(total_timesteps=32)
-        model.save("ppo_ads_circuit")
+        model.learn(total_timesteps=200_000)
+        model.save("PPO_test")
 
         workspace.close()
         
