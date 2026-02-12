@@ -203,7 +203,6 @@ class AdsCircuitEnv(gym.Env):
 
             return {"ok": True}
         except :
-            print(current_param[0])
             return {"ok": False}
         
 
@@ -266,7 +265,7 @@ def main():
     )
 
     runner = AdsRunnerConfig(
-        ADS_sim_output_dir="/home/jychung/ADS_project/test/"
+        ADS_sim_output_dir="/home/jychung/ADS_project/test/PPO_test_output/"
     )
 
     # Example parameter vector (e.g., TL lengths, widths, bias resistors...)
