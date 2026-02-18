@@ -1,7 +1,7 @@
 import os
 
 # Mobaxterm으로 linux 서버 직접 접속해서 DIPLAY 환경변수 확인하고 그 내용을 직접 할당
-os.environ["DISPLAY"]="localhost:16.0"
+os.environ["DISPLAY"]="localhost:13.0"
 print(os.environ.get("DISPLAY"))
 
 """
@@ -174,9 +174,9 @@ class AdsCircuitEnv(gym.Env):
         v_NF = (NF_b - spec.NF_db_target)  # <= 0 good
 
         # penalties: only when violation > 0
-        p_s11 = np.maximum(np.max(v_s11), 0.0)
-        p_s22 = np.maximum(np.max(v_s22), 0.0)
-        p_NF = np.maximum(np.max(v_NF), 0.0)
+        p_s11 = np.mean(np.maximum(v_s11, 0.0))
+        p_s22 = np.mean(np.maximum(v_s22, 0.0))
+        p_NF = np.mean(np.maximum(v_NF, 0))
         p_trade = float(p_s11 * p_NF)
 
         # reward as negative penalties (you can redesign this)
@@ -436,7 +436,7 @@ def main():
     )
 
     csv_logger = SparamCSVLogger(
-        out_dir="/home/jychung/python/target_spec"
+        out_dir="/home/jychung/python/target_spec/reward_mean_calc"
     )
 
     # (ELC19_W, ELC19_L, TL6_L)
@@ -506,8 +506,8 @@ def main():
         policy="MlpPolicy",
         env=vec_env,
         verbose=1,
-        n_steps=256,           # rollout length
-        batch_size=256,
+        n_steps=265,           # rollout length
+        batch_size=265,
         learning_rate=3e-4,
         gamma=0.99,
         gae_lambda=0.95,
@@ -515,7 +515,7 @@ def main():
         ent_coef=0.0,
         vf_coef=0.5,
         max_grad_norm=0.5,
-        tensorboard_log="./runs_25GHz_twostage_PPO",
+        tensorboard_log="/home/jychung/python/runs_25GHz_twostage_PPO",
         device="cpu",
     )
 
@@ -527,16 +527,16 @@ def main():
 
         best_params = base_env.best_params
 
-        np.savez("/home/jychung/python/final_params.npz",
+        np.savez("/home/jychung/python/best_reward_parameter/final_params2.npz",
                  general_TL=best_params["general_TL"],
                  bias_TL=best_params["bias_TL"],
                  ELC=best_params["ELC"])
         
-        model.save("ppo_ads_circuit2")
+        model.save("/home/jychung/python/model_saved/ppo_ads_circuit2")
         
         print("end 1 iter")
     except KeyboardInterrupt:
-        model.save("ppo_ads_circuit")
+        model.save("/home/jychung/python/model_saved/ppo_ads_circuit2")
         if (workspace.close()):
             print("workspace is closed successfully")
 
