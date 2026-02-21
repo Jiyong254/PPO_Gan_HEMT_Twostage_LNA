@@ -36,7 +36,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-from csv_logger import SparamCSVLogger
+from csv_logger import CSVLogger
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
@@ -50,6 +50,8 @@ class CircuitSpec:
     # Example targets (edit to your spec)
     s11_db_target: float = -10.0     # want <= -10 dB
     s22_db_target: float = -10.0
+    s21_db_target: float = 10.0
+    K_target: float = 1.0
     NF_db_target: float = 10.0     # want >= 10 dB (|S21| in dB)
     # Frequency band for evaluation
     f_min_ghz: float = 3.0
@@ -58,6 +60,8 @@ class CircuitSpec:
     # Reward weights
     w_s11: float = 1.0
     w_s22: float = 1.0
+    w_s21: float = 1.0
+    w_K: float = 1.5
     w_NF: float = 0.5
     w_penalty: float = 0.2
     w_trade: float = 0.5
@@ -88,7 +92,7 @@ class AdsCircuitEnv(gym.Env):
         design: db.Design,
         spec: CircuitSpec,
         runner: AdsRunnerConfig,
-        csv_logger: SparamCSVLogger,
+        csv_logger: CSVLogger,
         param_init: Dict[str, np.ndarray],
         param_low: Dict[str, np.ndarray],
         param_high: Dict[str, np.ndarray],
@@ -152,7 +156,11 @@ class AdsCircuitEnv(gym.Env):
         f = np.asarray(sim_output_data["freq"], dtype=float)
         s11 = np.asarray(sim_output_data["S[1,1]"], dtype=complex)
         s22 = np.asarray(sim_output_data["S[2,2]"], dtype=complex)
+        s12 = np.asarray(sim_output_data["S[1,2]"], dtype=complex)
         NF = np.asarray(sim_output_data["nf[2]"], dtype=float)
+        s21 = np.asarray(sim_output_data["S[2,1]"], dtype=complex)
+
+        K = (1 - (np.abs(s11))**2 - (np.abs(s22))**2 + (np.abs(s11*s22-s12*s21))**2)/(2*np.abs(s12*s21))
 
         # 관심 있는 주파수 영역만 남긴다
         idx_target_freq = np.where((f >= spec.f_min_ghz) & (f <= spec.f_max_ghz))[0]
@@ -163,12 +171,16 @@ class AdsCircuitEnv(gym.Env):
 
         s11_b = 20*np.log10(np.abs(s11[idx_target_freq]))
         s22_b = 20*np.log10(np.abs(s22[idx_target_freq]))
+        s21_b = 20*np.log10(np.abs(s21[idx_target_freq]))
+        K_b = K
         NF_b = NF[idx_target_freq]
 
         # Convert targets to "violations"
         # For S11/S22: want <= target (more negative is better)
         v_s11 = (s11_b - spec.s11_db_target)  # <= 0 good
-        v_s22 = (s22_b - spec.s22_db_target)
+        v_s22 = (s22_b - spec.s22_db_target)  # <= 0 good
+        v_s21 = (s21_b - spec.s21_db_target)  # <= 0 good
+        v_K = (spec.K_target - K_b)           # <= 0 good
 
         # For gain: want >= target
         v_NF = (NF_b - spec.NF_db_target)  # <= 0 good
@@ -176,20 +188,24 @@ class AdsCircuitEnv(gym.Env):
         # penalties: only when violation > 0
         p_s11 = np.mean(np.maximum(v_s11, 0.0))
         p_s22 = np.mean(np.maximum(v_s22, 0.0))
-        p_NF = np.mean(np.maximum(v_NF, 0))
+        p_s21 = np.mean(np.maximum(v_s21, 0.0))
+        p_K = np.mean(np.maximum(v_K, 0.0))
+        p_NF = np.mean(np.maximum(v_NF, 0.0))
         p_trade = float(p_s11 * p_NF)
 
         # reward as negative penalties (you can redesign this)
         reward = (
             -spec.w_s11 * p_s11
             -spec.w_s22 * p_s22
+            -spec.w_s21 * p_s21
+            -spec.w_K * p_K
             -spec.w_NF * p_NF
             -spec.w_trade * p_trade
         )
 
 
         # small bonus if fully meets all specs in-band
-        meets = (np.max(v_s11) <= 0) and (np.max(v_s22) <= 0) and (np.max(v_NF) <= 0)
+        meets = (np.max(v_s11) <= 0) and (np.max(v_s22) <= 0) and (np.max(v_s21)) <= 0 and (np.max(v_NF) <= 0) and (np.max(v_K) <= 0)
         if meets:
             reward += 5.0
 
@@ -202,14 +218,15 @@ class AdsCircuitEnv(gym.Env):
             "reward": float(reward),
             "s11" : 20*np.log10(np.abs(s11)),
             "s22" : 20*np.log10(np.abs(s22)),
+            "s21" : 20*np.log10(np.abs(s21)),
+            "K" : K,
             "NF" : NF,
             "f" : f
         }
 
         
-        print("reward computation done")
-        print(reward)
-        
+        print("reward computation done: ", reward)
+                
         return float(reward), info
 
 
@@ -408,9 +425,16 @@ class AdsCircuitEnv(gym.Env):
             NF = info.get("NF")
             f = info.get("f")
 
-            self.csv_logger.append("s11", s11, f)
-            self.csv_logger.append("s22", s22, f)
-            self.csv_logger.append("NF", NF, f)
+        # 어떤 데이터를 넣을건지 str으로 선택
+        # target_spec ==> sparameter를 주파수 f와 함께 csv에 입력
+        # device ==> 소자 값들을 주파수 f 없이 csv에 입력
+    
+            self.csv_logger.append("s11", s11, f, "target_spec")
+            self.csv_logger.append("s22", s22, f, "target_spec")
+            self.csv_logger.append("NF", NF, f, "target_spec")
+            self.csv_logger.append("general_TL", self.params["general_TL"], f,"device")
+            self.csv_logger.append("bias_TL", self.params["bias_TL"], f, "device")
+            self.csv_logger.append("ELC", self.params["ELC"], f, "device")
             
             self.csv_logger.next_episode()
             print(self.csv_logger.episode_idx)
@@ -426,17 +450,27 @@ def main():
     spec = CircuitSpec(
         s11_db_target=-10.0,
         s22_db_target=-10.0,
+        s21_db_target=10.0,
+        K_target=1.0,
         NF_db_target=2.0,
         f_min_ghz=12.0e9,
         f_max_ghz=18.0e9,
     )
 
+    target_spec_save_dir_name = "reward_mean_w_gain_K"
+    vecnormalize_save_dir_name = "vecnormalize_rw_mean_w_gain_K"
+    tensorboard_logfile_name = "mean_rw_w_gain_K"
+    best_param_file_name = "best_param_mean_rw_gain_K"
+    trained_model_name = "trained_model_mean_rw_w_gain_K"
+    device_param_saved_dir = "device_param_mean_rw_w_gain_K"
+
     runner = AdsRunnerConfig(
         ADS_sim_output_dir="/home/jychung/ADS_project/test/sim_logfile/"
     )
 
-    csv_logger = SparamCSVLogger(
-        out_dir="/home/jychung/python/target_spec/reward_mean_calc"
+    csv_logger = CSVLogger(
+        target_spec_out_dir=f"/home/jychung/python/target_spec/{target_spec_save_dir_name}",
+        device_param_out_dir=f"/home/jychung/python/device_param/{device_param_saved_dir}"
     )
 
     # (ELC19_W, ELC19_L, TL6_L)
@@ -502,6 +536,8 @@ def main():
         gamma=0.99
     )
 
+    vec_env.save(f"/home/jychung/python/vec_env_saved/{vecnormalize_save_dir_name}.pkl")
+
     model = PPO(
         policy="MlpPolicy",
         env=vec_env,
@@ -520,23 +556,23 @@ def main():
     )
 
     try :
-        model.learn(total_timesteps=100_00)
+        model.learn(total_timesteps=200_00, tb_log_name=tensorboard_logfile_name)
 
         env0 = vec_env.envs[0]
         base_env = env0.unwrapped
 
         best_params = base_env.best_params
 
-        np.savez("/home/jychung/python/best_reward_parameter/final_params2.npz",
+        np.savez(f"/home/jychung/python/best_reward_parameter/{best_param_file_name}.npz",
                  general_TL=best_params["general_TL"],
                  bias_TL=best_params["bias_TL"],
                  ELC=best_params["ELC"])
         
-        model.save("/home/jychung/python/model_saved/ppo_ads_circuit2")
+        model.save(f"/home/jychung/python/model_saved/{trained_model_name}")
         
         print("end 1 iter")
     except KeyboardInterrupt:
-        model.save("/home/jychung/python/model_saved/ppo_ads_circuit2")
+        model.save(f"/home/jychung/python/model_saved/{trained_model_name}")
         if (workspace.close()):
             print("workspace is closed successfully")
 
